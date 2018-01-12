@@ -8,6 +8,7 @@ from io import BytesIO
 from PIL import Image
 import imghdr
 import numpy as np
+import concurrent.futures
 
 # constants and globals
 BUCKET_NAME = "nanonets-platform-task"
@@ -36,19 +37,19 @@ def get_files():
 
     return images
 
-def download_image(row):
+def download_image(filename):
     string_io = BytesIO()
-    s3.download_fileobj(Bucket=BUCKET_NAME, Key=row['s3key'], Fileobj=string_io)
+    s3.download_fileobj(Bucket=BUCKET_NAME, Key=filename, Fileobj=string_io)
     return string_io
 
 def get_image_format(dat):
     return imghdr.what(None, dat.getvalue())
 
-def transform_image(row):
-    img_format = get_image_format(row['rawdata'])
+def transform_image(dat):
+    img_format = get_image_format(dat)
     if img_format == None:
         return "Invalid"
-    img_dat = Image.open(row['rawdata'])
+    img_dat = Image.open(dat)
     if img_format != 'jpeg':
         rgb_img_dat = img_dat.convert('RGB')
         resized = rgb_img_dat.resize(TARGET_SIZE)
@@ -59,16 +60,30 @@ def transform_image(row):
     out_bytes.seek(0)
     return out_bytes
 
-def upload_df_to_s3(df, split=""):
-    print('Uploading to bucket:{0}'.format(BUCKET_NAME))
-    for index, row in df.iterrows():
-        category_tracker[row['category']] += 1
-        s3key = 'processed/{0}/{1}/img{2}.jpg'.format(row['category'],
-                                                      split,
-                                                      category_tracker[row['category']])
-        print('Uploading file:{0}'.format(s3key))
-        s3.upload_fileobj(Bucket=BUCKET_NAME, Fileobj=row['resized'], Key=s3key, Callback=lambda x: print(x))
+def row_pipeline(row, split):
+    image_dat = download_image(row['s3key'])
+    resized_image = transform_image(image_dat)
+    if resized_image == "Invalid":
+        return "Invalid"
+    upload_img_to_s3(resized_image, row['category'], row['name'], split)
+    return "Done" 
 
+def upload_img_to_s3(img, category, filename, dataSplit=""):
+    s3key = 'processed/{0}/{1}/{2}.jpg'.format(category,
+                                                  dataSplit,
+                                                  filename)
+    print('Uploading file:{0}'.format(s3key))
+    s3.upload_fileobj(Bucket=BUCKET_NAME, Fileobj=img, Key=s3key, Callback=lambda x: print(x))
+
+def process_df(df_list, splits=[]):
+    pool = concurrent.futures.ThreadPoolExecutor(10)
+    futures = []
+    for df, split in zip(df_list, splits):
+        for index, row in df.iterrows():
+            futures.append(pool.submit(row_pipeline, row, split))
+    
+    print(concurrent.futures.wait(futures))
+        
 if __name__ == "__main__":
     print("Getting all files present in the the bucket: {0}".format(BUCKET_NAME))
     images = get_files()
@@ -82,23 +97,16 @@ if __name__ == "__main__":
     print("Creating a dataframe with image metadata")
     images_df = pd.DataFrame(images)
     images_df = images_df[images_df['format'] != 'unknown'] # drop unknown file types
-    print("Dimensions of created image dataframe: {0}".format(images_df.shape))
-
-    print("Downloading image data from S3")
-    images_df['rawdata'] = images_df.apply(download_image, axis=1) # this will take a while
-    print("Successfully downloaded all images into memory")
-    print("Resizing and converting all images to JPEG")
-    images_df['resized'] = images_df.apply(transform_image, axis=1)
-    print("Successfully preprocessed all images")
-    print("There are {0} invalid images".format(images_df[images_df['resized'] == "Invalid"].shape))
 
     print("Generating data splits")
-    train, validate, test = np.split(images_df.sample(frac=1), [int(.7*len(images_df)), int(.9*len(images_df))])
+    train, test, validate = np.split(images_df.sample(frac=1), [int(.7*len(images_df)), int(.9*len(images_df))])
 
-    print("Validate: {0}, Train: {1}, Test: {2}".format(validate.shape, test.shape, train.shape))
-
-    category_tracker = dict(zip(categories, [0]*len(categories)))
-    upload_df_to_s3(train, "train")
-    upload_df_to_s3(test, "test")
-    upload_df_to_s3(validate, "validate")
-    print("Finished uploading all preprocessed files to S3")
+    print("Running pipeline")
+                           
+    process_df([train, test, validate], ["train", "test", "validate"])
+    
+    #train['resize_status'] = train.apply(row_pipeline, axis=1, args=("train",))
+    #test['resize_status'] = test.apply(row_pipeline, axis=1, args=("test",))
+    #validate['resize_status'] = validate.apply(row_pipeline, axis=1, args=("validate",))
+    print("Successfully preprocessed all images")
+    
