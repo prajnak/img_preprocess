@@ -72,17 +72,17 @@ def upload_img_to_s3(img, category, filename, dataSplit=""):
     s3key = 'processed/{0}/{1}/{2}.jpg'.format(category,
                                                   dataSplit,
                                                   filename)
-    print('Uploading file:{0}'.format(s3key))
-    s3.upload_fileobj(Bucket=BUCKET_NAME, Fileobj=img, Key=s3key, Callback=lambda x: print(x))
+    #print('Uploading file:{0}'.format(s3key))
+    s3.upload_fileobj(Bucket=BUCKET_NAME, Fileobj=img, Key=s3key)
 
 def process_df(df_list, splits=[]):
-    pool = concurrent.futures.ThreadPoolExecutor(10)
+    pool = concurrent.futures.ThreadPoolExecutor(50)
     futures = []
     for df, split in zip(df_list, splits):
         for index, row in df.iterrows():
             futures.append(pool.submit(row_pipeline, row, split))
     
-    print(concurrent.futures.wait(futures))
+    return concurrent.futures.wait(futures)
         
 if __name__ == "__main__":
     print("Getting all files present in the the bucket: {0}".format(BUCKET_NAME))
